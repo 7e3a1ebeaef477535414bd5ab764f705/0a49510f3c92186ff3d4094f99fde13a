@@ -19,10 +19,6 @@ from models.geometric import SGNet
 from models.graphsaint import train_saint, evaluate_saint
 from models import geometric as geo
 
-# GCN Sampling
-from models.gcn_cv_sc import GCNSampling, GCNInfer, train as train_sampling, copy_params, evaluate as evaluate_sampling, \
-    prepare_graph
-
 use_cuda = torch.cuda.is_available()
 
 from datasets import load_data
@@ -122,21 +118,7 @@ def build_model(args, in_feats, n_hidden, n_classes, device, n_layers=1, backend
         else:
             raise NotImplementedError
     else:
-        if args.model == 'gcn_cv_sc':
-            infer_device = torch.device("cpu")  # for sampling
-            train_model = GCNSampling(in_feats,
-                                      n_hidden,
-                                      n_classes,
-                                      2,
-                                      F.relu,
-                                      args.dropout).to(device)
-            infer_model = GCNInfer(in_feats,
-                                   args.n_hidden,
-                                   n_classes,
-                                   2,
-                                   F.relu)
-            model = (train_model, infer_model)
-        elif args.model == 'gs-mean':
+        if args.model == 'gs-mean':
             model = GraphSAGE(in_feats, n_hidden, n_classes,
                               n_layers, F.relu, args.dropout,
                               'mean').to(device)
@@ -231,7 +213,6 @@ def main(args):
         RESULT_COLS[-1] = "f1-score"
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    use_sampling = args.model in ['gcn_cv_sc']
     has_parameters = args.model not in ['most_frequent']
     backend = 'geometric' if (args.model in ['jknet', 'sgnet'] or (args.sampling is not None and 'graphsaint' in args.sampling)) else 'dgl'
     print("Using backend:", backend)
@@ -260,10 +241,9 @@ def main(args):
     years = torch.LongTensor(years)
     n_classes = torch.unique(labels).size(0)
 
-    if not use_sampling:
-        features = features.to(device)
-        labels = labels.to(device)
-        print("Labels", labels.size())
+    features = features.to(device)
+    labels = labels.to(device)
+    print("Labels", labels.size())
 
     in_feats = features.shape[1]
     n_layers = args.n_layers
@@ -272,10 +252,6 @@ def main(args):
     model = build_model(args, in_feats, n_hidden, n_classes, device,
                         n_layers=args.n_layers, backend=backend,
                         edge_index=graph, num_nodes=num_nodes)
-    if args.model == 'gcn_cv_sc':
-        # unzip training and inference models
-        model, infer_model = model
-
     print(model)
     num_params = sum(np.product(p.size()) for p in model.parameters())
     print("#params:", num_params)
@@ -343,11 +319,7 @@ def main(args):
         print("Selecting", subg_features.size(0), "of", features.size(0), "papers for initial training.")
 
         train_nids = torch.cat([train_nid, test_nid])  # use all nodes in subg for initial pre-training
-        if use_sampling:
-            prepare_graph(subg, subg_features, n_layers, n_hidden)
-            train_sampling(model, optimizer, F.cross_entropy, 1, subg, train_nids, subg_labels, args.initial_epochs,
-                           batch_size=args.batch_size, num_workers=args.num_workers)
-        elif args.model == 'mostfrequent':
+        if args.model == 'mostfrequent':
             model.fit(None, subg_labels)
         elif args.model == "graphsaint":
             train_saint(model, optimizer, subg, subg_features, subg_labels,
@@ -376,8 +348,10 @@ def main(args):
         # Get the current subgraph
 
         if args.sampling is not None and ('graphsaint' in args.sampling):
+            # GraphSAINT is trained on data until t - 1
             year_cutoff = current_year - 1
         else:
+            # Other methods are trained on data until t (w/o test labels for t)
             year_cutoff = current_year
 
         data = prepare_data_for_year(graph,
@@ -393,8 +367,6 @@ def main(args):
 
         if args.decay is not None:
             # Use decay factor to weight the loss function based on time steps t
-            if use_sampling:
-                raise NotImplementedError("Decay can only be used without sampling")
             weights = compute_weights(years[train_nid], args.decay, normalize=True).to(device)
         else:
             weights = None
@@ -419,9 +391,6 @@ def main(args):
             del model
             model = build_model(args, in_feats, n_hidden, n_classes, device, n_layers=args.n_layers,
                                 edge_index=subg, num_nodes=subg_features.size(0))
-            if args.model == 'gcn_cv_sc':
-                # unzip training and inference models
-                model, infer_model = model
         elif args.start == 'cold' or (args.start == 'hybrid' and new_classes):
             # NEW version, equivalent to legacy-cold, but more efficient
             model.reset_parameters()
@@ -458,26 +427,7 @@ def main(args):
             optimizer = torch.optim.Adam(model.parameters(),
                                          lr=args.lr * args.rescale_lr,
                                          weight_decay=args.weight_decay * args.rescale_wd)
-        if use_sampling:
-            if epochs > 0:
-                prepare_graph(subg, subg_features, n_layers, n_hidden)
-                train_sampling(model,
-                               optimizer,
-                               F.cross_entropy,
-                               1,
-                               subg,
-                               train_nid,
-                               subg_labels,
-                               epochs)
-                copy_params(infer_model, model)
-
-            acc = evaluate_sampling(infer_model,
-                                    subg,
-                                    test_nid,
-                                    subg_labels,
-                                    batch_size=args.test_batch_size,
-                                    num_workers=args.num_workers)
-        elif args.model == 'mostfrequent':
+        if args.model == 'mostfrequent':
             if epochs > 0:
                 # Re-fit only if uptraining is in general allowed!
                 model.fit(None, subg_labels[train_nid])
@@ -505,6 +455,9 @@ def main(args):
                             coverage=args.saint_coverage,
                             l=args.cb_l,
                             prob_exp=args.cb_prob_exp)
+
+            # Now, include time step t for GraphSAINT for evaluation.
+            # GraphSAINT had only access to data until t - 1 before.
             subg, subg_features, subg_labels, subg_years, train_nid, test_nid = prepare_data_for_year(graph,
                                                                                                       features,
                                                                                                       labels,
@@ -561,8 +514,7 @@ DATASET_PATHS = {
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, help="Specify model", default='gs-mean',
-                        choices=['mlp', 'gs-mean', 'gcn_cv_sc', 'mostfrequent',
-                                 'gat', 'gcn', 'jknet', 'sgnet'])
+                        choices=['mlp', 'gs-mean', 'mostfrequent', 'gat', 'gcn', 'jknet', 'sgnet'])
     parser.add_argument('--sampling', type=str, choices=['graphsaint_rw', 'graphsaint_node', 'graphsaint_edge'],
                         default=None)
     parser.add_argument('--variant', type=str, default='',
