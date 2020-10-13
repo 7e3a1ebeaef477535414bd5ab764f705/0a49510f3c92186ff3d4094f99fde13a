@@ -1,0 +1,15 @@
+torch
+dgl~=0.4.3post2
+numpy~=1.18.1
+pandas~=1.0.4
+matplotlib~=3.2.1
+seaborn~=0.10.1
+
+networkx~=2.4
+tqdm~=4.46.1
+joblib~=0.15.1
+scikit-learn~=0.23.1
+scipy~=1.5.0
+
+utils
+pyaml
