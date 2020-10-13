@@ -1,3 +1,11 @@
+"""
+Implementation for GCNs with control variate sampling
+Paper: https://arxiv.org/abs/1710.10568
+Reference Implementation: dgl.ai Examples
+
+**not used for our current ICLR2021 submission**
+
+"""
 import argparse, time, math
 import numpy as np
 import torch
